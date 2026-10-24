@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Acme Notes</title>
+    <script
+      async
+      src="http://localhost:5173/sdk/v1/firstfive.js"
+      data-project-id="ffp_demo"
+    ></script>
+  </head>
+  <body style="font: 16px system-ui; max-width: 640px; margin: 40px auto">
+    <h1>Acme Notes</h1>
+    <p>Notes that organise themselves.</p>
+    <a href="/signup" data-firstfive-id="get_started">Get Started</a>
+    <button
+      type="button"
+      data-firstfive-id="explore_features"
+      onclick="
+        history.pushState(null, '', '/features');
+        document.getElementById('features').hidden = false;
+      "
+    >
+      Explore Features
+    </button>
+    <section id="features" hidden>
+      <h2>Features</h2>
+      <p>Smart folders, search and sharing.</p>
+      <a href="/signup">Sign up from features</a>
+    </section>
+  </body>
+</html>

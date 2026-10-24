@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sign up · Acme Notes</title>
+    <script
+      async
+      src="http://localhost:5173/sdk/v1/firstfive.js"
+      data-project-id="ffp_demo"
+    ></script>
+  </head>
+  <body style="font: 16px system-ui; max-width: 640px; margin: 40px auto">
+    <h1>Create your account</h1>
+    <form
+      data-firstfive-id="signup_form"
+      onsubmit="
+        event.preventDefault();
+        window.location.href = '/dashboard';
+      "
+    >
+      <label>Email <input type="email" name="email" placeholder="you@example.com" /></label>
+      <label>Password <input type="password" name="password" /></label>
+      <button type="submit" data-firstfive-id="create_account">Create Account</button>
+    </form>
+  </body>
+</html>

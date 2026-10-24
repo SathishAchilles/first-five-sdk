@@ -1,0 +1,58 @@
+{
+  "name": "@firstfive/sdk",
+  "version": "0.1.0",
+  "description": "First Five browser SDK: setup discovery, consented task tracking and the task-control widget for First Five usability studies.",
+  "license": "MIT",
+  "author": "Sathish",
+  "type": "module",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs"
+    },
+    "./iife": "./dist/firstfive.iife.min.js"
+  },
+  "unpkg": "./dist/firstfive.iife.min.js",
+  "jsdelivr": "./dist/firstfive.iife.min.js",
+  "files": [
+    "dist"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SathishAchilles/first-five-sdk.git"
+  },
+  "homepage": "https://github.com/SathishAchilles/first-five-sdk#readme",
+  "bugs": "https://github.com/SathishAchilles/first-five-sdk/issues",
+  "keywords": [
+    "usability",
+    "user-research",
+    "analytics",
+    "sdk",
+    "first-five"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "tag": "next"
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsup",
+    "dev": "npm run build && node dev/mock-server.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write .",
+    "size": "node -e \"const z=require('zlib'),f=require('fs');const b=f.readFileSync('dist/firstfive.iife.min.js');console.log('iife raw',b.length,'bytes, gzip',z.gzipSync(b,{level:9}).length,'bytes')\""
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "eslint": "^9.39.5",
+    "happy-dom": "^21.0.4",
+    "prettier": "^3.9.10",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.72.0",
+    "vitest": "^3.2.7"
+  }
+}
