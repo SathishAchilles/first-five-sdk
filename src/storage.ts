@@ -30,4 +30,5 @@ export const keys = {
   sequence: (scope: string) => `ff:seq:${scope}`,
   queue: (scope: string) => `ff:q:${scope}`,
   setupWalk: (projectId: string) => `ff:walk:${projectId}`,
+  widgetCorner: () => 'ff:widget:corner',
 };

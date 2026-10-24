@@ -119,7 +119,7 @@ describe('live mode', () => {
     window.history.pushState(null, '', '/dashboard');
     await waitFor(() => s.diagnose().state === 'GOAL_CONFIRMED');
     expect(widgetText()).toContain('Task complete');
-    expect(widgetActions()).toEqual(['continue']);
+    expect(widgetActions().filter((a) => a !== 'move' && a !== 'minimise')).toEqual(['continue']);
   });
 
   it('restores GOAL_CONFIRMED after a reload from the first ACK (A26 + A08)', async () => {
@@ -133,7 +133,7 @@ describe('live mode', () => {
     await again.init({ projectId: PID, endpoint: API });
     expect(again.sm.state).toBe('LIVE_ACTIVE');
     await waitFor(() => again.sm.state === 'GOAL_CONFIRMED');
-    expect(widgetActions()).toEqual(['continue']);
+    expect(widgetActions().filter((a) => a !== 'move' && a !== 'minimise')).toEqual(['continue']);
     again.stop();
   });
 
