@@ -1,5 +1,3 @@
-import { SDK_VERSION } from './version';
-
 export interface HttpResult<T> {
   status: number;
   body: T | null;
@@ -18,12 +16,10 @@ export interface RequestOptions {
 export async function request<T>(url: string, opts: RequestOptions = {}): Promise<HttpResult<T>> {
   const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
   const timer = setTimeout(() => controller?.abort(), opts.timeoutMs ?? 5000);
-  // GETs stay CORS-simple (no preflight); POSTs carry the JSON body and SDK version header.
+  // Only content-type and authorization: the API's CORS preflight allows exactly these two.
+  // The SDK version travels in the body (exchange, events) or as a query param (config).
   const headers: Record<string, string> = {};
-  if (opts.body !== undefined) {
-    headers['Content-Type'] = 'application/json';
-    headers['X-FirstFive-SDK'] = SDK_VERSION;
-  }
+  if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
   if (opts.credential) headers.Authorization = `Bearer ${opts.credential}`;
   try {
     const res = await fetch(url, {

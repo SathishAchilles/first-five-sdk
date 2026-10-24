@@ -1,5 +1,7 @@
 /** Route, label and element-key sanitisation. Never reads input values (PRD §2.8). */
 
+import type { ElementType } from './contracts';
+
 export const ELIGIBLE_SELECTOR =
   'button,a[href],[role=button],input[type=submit],input[type=button],[data-firstfive-id]';
 
@@ -42,12 +44,23 @@ export function maskText(text: string): string {
     .slice(0, 80);
 }
 
-/** Visible label only (never `.value`). */
+const EDITABLE = '[contenteditable]:not([contenteditable="false"]),input,textarea,select';
+
+/** True when the element is, sits in, or contains user-editable content. */
+function hasEditableText(el: Element): boolean {
+  return (
+    (el as HTMLElement).isContentEditable === true ||
+    !!el.closest('[contenteditable]:not([contenteditable="false"])') ||
+    !!el.querySelector(EDITABLE)
+  );
+}
+
+/** Visible label only (never `.value`, never text typed into editable content). */
 export function safeLabel(el: Element): string {
   const candidates = [
     el.getAttribute('aria-label'),
     el.getAttribute('data-firstfive-label'),
-    (el as HTMLElement).innerText ?? el.textContent,
+    hasEditableText(el) ? null : ((el as HTMLElement).innerText ?? el.textContent),
     el.getAttribute('title'),
     el.getAttribute('alt'),
   ];
@@ -68,7 +81,7 @@ export function fnv1a(input: string): string {
 
 export function elementKey(el: Element): string {
   const explicit = el.getAttribute('data-firstfive-id');
-  if (explicit) return explicit.slice(0, 80);
+  if (explicit) return explicit.slice(0, 120);
   const parts = [
     el.tagName.toLowerCase(),
     el.getAttribute('id') ?? '',
@@ -79,11 +92,15 @@ export function elementKey(el: Element): string {
   return 'auto:' + fnv1a(parts.join('|'));
 }
 
-export function elementType(el: Element): string {
+/** Map an element to the contract's element_type enum. */
+export function elementType(el: Element): ElementType {
   const tag = el.tagName.toLowerCase();
-  if (tag === 'input') return `input_${el.getAttribute('type') ?? 'button'}`;
+  if (tag === 'input') return el.getAttribute('type') === 'submit' ? 'submit' : 'button';
+  if (tag === 'button') return el.getAttribute('type') === 'submit' ? 'submit' : 'button';
   if (tag === 'a') return 'link';
-  return el.getAttribute('role') === 'button' && tag !== 'button' ? 'role_button' : tag;
+  if (tag === 'form') return 'form';
+  if (el.getAttribute('role') === 'button') return 'role_button';
+  return 'other';
 }
 
 /** True when the element sits in an area the SDK must never record. */

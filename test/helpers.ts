@@ -2,8 +2,7 @@ import type {
   CanonicalEvent,
   EndRequest,
   EventsRequest,
-  ExchangeRequest,
-  SdkConfig,
+  SdkConfigResponse,
 } from '../src/contracts';
 
 export const ORIGIN = 'http://localhost:3000';
@@ -18,33 +17,68 @@ export interface Call {
   at: number;
 }
 
+export const PID = 'ffp_demo0001';
+export const SID = 'ffx_sess0001';
+export const STID = 'ffs_stud0001';
+
 export interface FakeApiOptions {
   allowedOrigins?: string[];
+  allowedCustomEvents?: string[];
   goalRoute?: string;
   exchangeStatus?: number;
   eventsStatus?: number;
   endStatus?: number;
-  endUrl?: string;
-  setupReturnUrl?: string;
+  endUrl?: string | null;
+  setupReturnUrl?: string | null;
   eventsDelayMs?: number;
   taskText?: string;
+  sessionStatusOverride?: 'dropped' | 'invalid';
 }
 
-/** In-memory fake of the Render API contract, installed as global fetch. */
+const EVENT_KEYS = new Set([
+  'schema_version',
+  'event_id',
+  'event_name',
+  'project_id',
+  'study_id',
+  'session_id',
+  'mode',
+  'client_sequence',
+  'timestamp',
+  'page_path',
+  'element_id',
+  'element_type',
+  'element_label',
+  'custom_event_name',
+  'properties',
+]);
+
+/** In-memory fake of the Render API contract (packages/sdk-contract), installed as global fetch. */
 export class FakeApi {
   calls: Call[] = [];
   events: CanonicalEvent[] = [];
   goalVerified = false;
   constructor(public opts: FakeApiOptions = {}) {}
 
-  config(): SdkConfig {
+  config(): SdkConfigResponse {
     return {
+      project_id: PID,
       status: 'active',
+      contract_version: 1,
+      api_base_url: API,
       allowed_origins: this.opts.allowedOrigins ?? [ORIGIN],
-      events_url: `${API}/api/sdk/events`,
-      event_allowlist: [],
-      custom_event_allowlist: ['signup_completed'],
-      max_batch_events: 20,
+      event_allowlist: [
+        'ff_page_viewed',
+        'ff_element_clicked',
+        'ff_form_submitted',
+        'ff_custom_event',
+        'ff_activity',
+        'ff_client_error',
+        'ff_element_discovered',
+        'ff_goal_reached',
+      ],
+      allowed_custom_events: this.opts.allowedCustomEvents ?? ['signup_completed'],
+      limits: { maxEventsPerBatch: 50 },
       first_five_origin: FF,
     };
   }
@@ -68,34 +102,67 @@ export class FakeApi {
         status,
         headers: { 'Content-Type': 'application/json' },
       });
+    const err = (status: number, code: string) => json(status, { error: { code, message: code } });
 
     if (path === '/api/sdk/config') return json(200, this.config());
 
     if (path === '/api/sdk/exchange') {
-      const req = body as ExchangeRequest;
+      const req = body as Record<string, unknown>;
+      const extra = Object.keys(req).filter(
+        (k) => !['project_id', 'ticket', 'sdk_version'].includes(k),
+      );
+      if (extra.length) return err(400, 'invalid_request');
       if (this.opts.exchangeStatus && this.opts.exchangeStatus !== 200) {
-        return json(this.opts.exchangeStatus, { error: 'expired' });
+        return err(this.opts.exchangeStatus, 'ticket_consumed');
       }
-      const live = req.kind === 'live';
+      const ticket = String(req.ticket);
+      const live = !ticket.startsWith('setup');
+      const expires = new Date(Date.now() + 60_000).toISOString();
       return json(200, {
-        credential: `cred-${req.ticket}`,
-        expires_at: new Date(Date.now() + 60_000).toISOString(),
-        mode: req.kind,
-        session_id: live ? 'ffx_1' : null,
-        study_id: live ? 'ffs_1' : null,
-        task_text: this.opts.taskText ?? 'Create an account and reach your dashboard',
+        credential: `cred-${ticket}`,
+        mode: live ? 'live' : 'setup',
+        expires_at: expires,
+        project_id: PID,
+        ...(live
+          ? {
+              study: {
+                study_id: STID,
+                session_id: SID,
+                task: this.opts.taskText ?? 'Create an account and reach your dashboard',
+                deadline_at: expires,
+                goal_type: 'page_reached',
+              },
+            }
+          : { setup: { setup_session_id: 'set_1', expires_at: expires } }),
       });
     }
 
     if (path === '/api/sdk/events') {
       if (this.opts.eventsDelayMs) await new Promise((r) => setTimeout(r, this.opts.eventsDelayMs));
       if (this.opts.eventsStatus && this.opts.eventsStatus !== 200) {
-        return json(this.opts.eventsStatus, { error: 'x' });
+        return err(this.opts.eventsStatus, 'x');
       }
-      const req = body as EventsRequest;
+      const req = body as EventsRequest & Record<string, unknown>;
+      if (
+        req.schema_version !== 1 ||
+        Object.keys(req).some((k) => !['schema_version', 'sdk_version', 'events'].includes(k))
+      ) {
+        return err(400, 'invalid_request');
+      }
       const accepted: string[] = [];
+      const duplicates: string[] = [];
+      const rejected: { event_id: string | null; code: string; message: string }[] = [];
       for (const e of req.events) {
-        if (!this.events.some((x) => x.event_id === e.event_id)) this.events.push(e);
+        const bad = Object.keys(e).filter((k) => !EVENT_KEYS.has(k));
+        if (bad.length || (e.mode === 'setup' && (e.session_id || e.study_id))) {
+          rejected.push({ event_id: e.event_id, code: 'invalid_schema', message: bad.join(',') });
+          continue;
+        }
+        if (this.events.some((x) => x.event_id === e.event_id)) {
+          duplicates.push(e.event_id);
+          continue;
+        }
+        this.events.push(e);
         accepted.push(e.event_id);
         if (
           this.opts.goalRoute &&
@@ -107,34 +174,45 @@ export class FakeApi {
         }
       }
       const live = req.events.some((e) => e.mode === 'live');
-      return json(200, {
+      const status =
+        this.opts.sessionStatusOverride ?? (this.goalVerified ? 'completed' : 'pending');
+      return json(rejected.length && !accepted.length && !duplicates.length ? 422 : 200, {
         accepted,
-        rejected: [],
-        last_acked_sequence: Math.max(0, ...this.events.map((e) => e.client_sequence)),
-        ...(live ? { goal_status: this.goalVerified ? 'verified' : 'pending' } : {}),
+        duplicates,
+        rejected,
+        goal: live ? { verified: this.goalVerified, verified_event_id: null } : null,
+        session_status: live ? status : null,
       });
     }
 
-    if (/^\/api\/sessions\/[^/]+\/end$/.test(path)) {
+    if (path === '/api/sdk/session/end') {
       const status = this.opts.endStatus ?? 200;
-      if (status !== 200) return json(status, { error: 'x' });
+      if (status !== 200) return err(status, 'x');
       const req = body as EndRequest;
+      if (!['finished', 'gave_up'].includes(req.reason)) return err(400, 'invalid_request');
       return json(200, {
-        outcome: this.goalVerified ? 'completed' : req.reason === 'stuck' ? 'dropped' : 'dropped',
-        feedback_handoff: {
-          url: this.opts.endUrl ?? `${FF}/study/ffs_1/feedback?handoff=h1`,
-          expires_at: '',
-        },
+        session_status: this.goalVerified ? 'completed' : 'dropped',
+        final_reason: this.goalVerified
+          ? 'goal_verified'
+          : req.reason === 'gave_up'
+            ? 'explicit_stop'
+            : 'finished_without_goal',
+        feedback_url:
+          this.opts.endUrl === undefined ? `${FF}/t/${STID}/feedback#h=h1` : this.opts.endUrl,
       });
     }
 
     if (path === '/api/sdk/setup/finish') {
-      return json(200, {
-        return_url: this.opts.setupReturnUrl ?? `${FF}/projects/ffp_1/discovery?setup=done`,
-      });
+      const r = this.opts.setupReturnUrl;
+      return json(
+        200,
+        r === null
+          ? { status: 'finished' }
+          : { status: 'finished', return_url: r ?? `${FF}/app/websites/p1` },
+      );
     }
 
-    return json(404, { error: 'not found' });
+    return err(404, 'not_found');
   };
 }
 

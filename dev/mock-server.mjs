@@ -12,7 +12,7 @@ const HOST_PORT = Number(process.env.FF_HOST_PORT ?? 5174);
 const FF = `http://localhost:${API_PORT}`;
 const HOST = `http://localhost:${HOST_PORT}`;
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
-const PROJECT_ID = 'ffp_demo';
+const PROJECT_ID = 'ffp_demo0001';
 const GOAL_ROUTE = '/dashboard';
 
 const tickets = new Map(); // ticket -> { kind, used, session_id }
@@ -31,7 +31,8 @@ function cors(req, res) {
     res.setHeader('Vary', 'Origin');
   }
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Authorization,Content-Type,X-FirstFive-SDK');
+  // mirror the Render API: only content-type and authorization are allowed
+  res.setHeader('Access-Control-Allow-Headers', 'content-type, authorization');
   res.setHeader('Access-Control-Max-Age', '600');
 }
 
@@ -71,20 +72,28 @@ const api = createServer(async (req, res) => {
 
     if (path === '/api/sdk/config') {
       return send(res, 200, {
+        project_id: PROJECT_ID,
         status: 'active',
+        contract_version: 1,
+        api_base_url: FF,
         allowed_origins: [HOST],
-        events_url: `${FF}/api/sdk/events`,
-        event_allowlist: [],
-        custom_event_allowlist: ['signup_completed'],
-        max_batch_events: 20,
-        first_five_origin: FF,
+        event_allowlist: [
+          'ff_page_viewed',
+          'ff_element_clicked',
+          'ff_form_submitted',
+          'ff_custom_event',
+          'ff_element_discovered',
+        ],
+        allowed_custom_events: ['signup_completed'],
+        limits: { maxEventsPerBatch: 50 },
       });
     }
 
     if (path === '/dev/mint') {
       const kind = url.searchParams.get('kind') === 'setup' ? 'setup' : 'live';
       const ticket = randomUUID();
-      const session_id = kind === 'live' ? `ffx_${randomUUID().slice(0, 8)}` : null;
+      const session_id =
+        kind === 'live' ? `ffx_${randomUUID().replace(/-/g, '').slice(0, 12)}` : null;
       tickets.set(ticket, { kind, used: false, session_id });
       if (session_id)
         sessions.set(session_id, { status: 'pending', goal_verified: false, events: [] });
@@ -100,40 +109,59 @@ const api = createServer(async (req, res) => {
 
     if (path === '/api/sdk/exchange' && req.method === 'POST') {
       const body = await readBody(req);
-      const t = tickets.get(body.ticket);
-      log(
-        'exchange',
-        body.kind,
-        'sdk',
-        body.sdk_version,
-        t ? (t.used ? 'REUSED' : 'ok') : 'UNKNOWN',
+      const extra = Object.keys(body).filter(
+        (k) => !['project_id', 'ticket', 'sdk_version'].includes(k),
       );
-      if (!t || t.used || t.kind !== body.kind) return send(res, 410, { error: 'ticket_invalid' });
+      if (extra.length)
+        return send(res, 400, {
+          error: { code: 'invalid_request', message: `unknown keys ${extra}` },
+        });
+      const t = tickets.get(body.ticket);
+      log('exchange sdk', body.sdk_version, t ? (t.used ? 'REUSED' : t.kind) : 'UNKNOWN');
+      if (!t || t.used)
+        return send(res, 410, {
+          error: { code: 'ticket_consumed', message: 'Ticket already used.' },
+        });
       t.used = true;
       const credential = randomUUID();
       credentials.set(credential, { kind: t.kind, session_id: t.session_id });
+      const expires_at = new Date(Date.now() + 30 * 60_000).toISOString();
       return send(res, 200, {
         credential,
-        expires_at: new Date(Date.now() + 30 * 60_000).toISOString(),
         mode: t.kind,
-        session_id: t.session_id,
-        study_id: t.session_id ? 'ffs_demo' : null,
-        task_text: 'Create an account and reach your dashboard.',
+        expires_at,
+        project_id: PROJECT_ID,
+        ...(t.session_id
+          ? {
+              study: {
+                study_id: 'ffs_demo0001',
+                session_id: t.session_id,
+                task: 'Create an account and reach your dashboard.',
+                deadline_at: expires_at,
+                goal_type: 'page_reached',
+              },
+            }
+          : { setup: { setup_session_id: 'set_demo', expires_at } }),
       });
     }
 
     if (path === '/api/sdk/events' && req.method === 'POST') {
       const cred = auth(req);
-      if (!cred) return send(res, 401, { error: 'unauthorized' });
+      if (!cred)
+        return send(res, 401, { error: { code: 'unauthenticated', message: 'No credential.' } });
       const body = await readBody(req);
-      const accepted = [];
+      if (body.schema_version !== 1)
+        return send(res, 400, { error: { code: 'invalid_request', message: 'schema_version' } });
       const store = cred.session_id ? sessions.get(cred.session_id) : null;
-      if (store && store.status !== 'pending' && store.status !== 'completed') {
-        return send(res, 410, { error: 'session_ended' });
-      }
       const target = store ? store.events : setupEvents;
+      const accepted = [];
+      const duplicates = [];
       for (const e of body.events ?? []) {
-        if (!target.some((x) => x.event_id === e.event_id)) target.push(e);
+        if (target.some((x) => x.event_id === e.event_id)) {
+          duplicates.push(e.event_id);
+          continue;
+        }
+        target.push(e);
         accepted.push(e.event_id);
         if (
           store &&
@@ -146,7 +174,6 @@ const api = createServer(async (req, res) => {
           log('GOAL VERIFIED', cred.session_id, 'seq', e.client_sequence);
         }
       }
-      const seqs = target.map((e) => e.client_sequence);
       log(
         'events',
         cred.kind,
@@ -154,24 +181,28 @@ const api = createServer(async (req, res) => {
         (body.events ?? [])
           .map(
             (e) =>
-              `${e.client_sequence}:${e.event_name}:${e.page_path}${e.element_key ? ':' + e.element_key : ''}`,
+              `${e.client_sequence}:${e.event_name}:${e.page_path ?? ''}${e.element_id ? ':' + e.element_id : ''}${duplicates.includes(e.event_id) ? '(dup)' : ''}`,
           )
           .join(' '),
       );
       return send(res, 200, {
         accepted,
+        duplicates,
         rejected: [],
-        last_acked_sequence: seqs.length ? Math.max(...seqs) : 0,
-        ...(store ? { goal_status: store.goal_verified ? 'verified' : 'pending' } : {}),
+        goal: store ? { verified: store.goal_verified, verified_event_id: null } : null,
+        session_status: store ? store.status : null,
       });
     }
 
-    const end = path.match(/^\/api\/sessions\/([^/]+)\/end$/);
-    if (end && req.method === 'POST') {
+    if (path === '/api/sdk/session/end' && req.method === 'POST') {
       const cred = auth(req);
-      if (!cred || cred.session_id !== end[1]) return send(res, 401, { error: 'unauthorized' });
+      if (!cred || !cred.session_id)
+        return send(res, 401, {
+          error: { code: 'unauthenticated', message: 'No live credential.' },
+        });
+      const id = cred.session_id;
       const body = await readBody(req);
-      const s = sessions.get(end[1]);
+      const s = sessions.get(id);
       const maxSeq = s.events.length ? Math.max(...s.events.map((e) => e.client_sequence)) : 0;
       if (s.status === 'pending') s.status = 'dropped';
       s.ended_with = {
@@ -181,7 +212,7 @@ const api = createServer(async (req, res) => {
       };
       log(
         'end',
-        end[1],
+        id,
         body.reason,
         'last_client_sequence',
         body.last_client_sequence,
@@ -191,11 +222,14 @@ const api = createServer(async (req, res) => {
         s.status,
       );
       return send(res, 200, {
-        outcome: s.status,
-        feedback_handoff: {
-          url: `${FF}/study/ffs_demo/feedback?handoff=${randomUUID()}`,
-          expires_at: new Date(Date.now() + 15 * 60_000).toISOString(),
-        },
+        session_status: s.status,
+        final_reason:
+          s.status === 'completed'
+            ? 'goal_verified'
+            : body.reason === 'gave_up'
+              ? 'explicit_stop'
+              : 'finished_without_goal',
+        feedback_url: `${FF}/t/ffs_demo0001/feedback#h=${randomUUID()}`,
       });
     }
 
@@ -209,10 +243,10 @@ const api = createServer(async (req, res) => {
         'events',
         setupEvents.length,
       );
-      return send(res, 200, { return_url: `${FF}/projects/${PROJECT_ID}/discovery?setup=done` });
+      return send(res, 200, { status: 'finished', return_url: `${FF}/app/websites/demo` });
     }
 
-    if (path.startsWith('/study/') && path.endsWith('/feedback')) {
+    if (path.startsWith('/t/') && path.endsWith('/feedback')) {
       return send(
         res,
         200,
@@ -221,7 +255,7 @@ const api = createServer(async (req, res) => {
       );
     }
 
-    if (path.startsWith('/projects/')) {
+    if (path.startsWith('/app/websites')) {
       const pages = [...new Set(setupEvents.map((e) => e.page_path))];
       const els = setupEvents.filter((e) => e.event_name === 'ff_element_discovered');
       return send(

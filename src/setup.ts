@@ -21,12 +21,20 @@ async function run(core: FirstFiveCore): Promise<void> {
   transport.stop();
 
   const res = await postWithRetry<SetupFinishResponse>(
-    `${core.endpoint}/api/sdk/setup/finish`,
+    `${core.apiBaseUrl}/api/sdk/setup/finish`,
     { last_client_sequence: core.sequence.current() },
     cred.credential,
     core.retryDelaysMs,
   );
-  const url = res?.status === 200 ? res.body?.return_url : undefined;
+  if (res?.status === 401 || res?.status === 410) {
+    core.lastErrorCode = `setup_finish_http_${res.status}`;
+    core.showEnded();
+    core.terminate();
+    return;
+  }
+  const ok = res?.status === 200 && !!res.body;
+  // return_url is optional on the server; default to the builder's websites list
+  const url = ok ? (res?.body?.return_url ?? `${core.returnUrl()}/app/websites`) : undefined;
   if (!url || !core.isFirstFiveUrl(url)) {
     core.fail(res ? `setup_finish_http_${res.status}` : 'setup_finish_network');
     core.widget.render({ kind: 'error', returnUrl: core.returnUrl() });

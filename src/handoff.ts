@@ -56,6 +56,20 @@ export type ExchangeOutcome =
   | { kind: 'rejected'; status: number }
   | { kind: 'error' };
 
+/** Flatten the exchange response (live context is nested under `study`). */
+export function toStoredCredential(body: ExchangeResponse, projectId: string): StoredCredential {
+  return {
+    credential: body.credential,
+    expires_at: body.expires_at,
+    mode: body.mode,
+    project_id: body.project_id || projectId,
+    session_id: body.study?.session_id ?? null,
+    study_id: body.study?.study_id ?? null,
+    task_text: body.study?.task,
+    deadline_at: body.study?.deadline_at,
+  };
+}
+
 export async function exchange(
   endpoint: string,
   projectId: string,
@@ -64,17 +78,17 @@ export async function exchange(
   try {
     const res = await request<ExchangeResponse>(`${endpoint}/api/sdk/exchange`, {
       method: 'POST',
-      body: {
-        project_id: projectId,
-        ticket: ticket.ticket,
-        kind: ticket.kind,
-        sdk_version: SDK_VERSION,
-      },
+      body: { project_id: projectId, ticket: ticket.ticket, sdk_version: SDK_VERSION },
     });
     if (res.status === 200 && res.body?.credential) {
-      return { kind: 'ok', credential: { ...res.body, project_id: projectId } };
+      if (res.body.mode !== ticket.kind) {
+        console.warn(
+          `[FirstFive] ticket was ${ticket.kind} but the server issued a ${res.body.mode} credential`,
+        );
+      }
+      return { kind: 'ok', credential: toStoredCredential(res.body, projectId) };
     }
-    if (res.status === 401 || res.status === 403 || res.status === 410) {
+    if ([401, 403, 404, 410].includes(res.status)) {
       return { kind: 'rejected', status: res.status };
     }
     return { kind: 'error' };

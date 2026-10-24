@@ -1,7 +1,7 @@
 import type { CanonicalEvent, EventsRequest, EventsResponse } from './contracts';
 import { isRetryable, request, sleep } from './http';
-import { uuid } from './ids';
 import { keys, readJson, remove, writeJson } from './storage';
+import { SDK_VERSION } from './version';
 
 export interface TransportOptions {
   eventsUrl: string;
@@ -41,7 +41,7 @@ export interface FlushResult {
 export class Transport {
   private queue: CanonicalEvent[] = [];
   private readonly acked = new Set<string>();
-  private inFlight: Promise<boolean> | null = null;
+  private draining: Promise<void> | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
   private lastAcked = 0;
@@ -73,28 +73,17 @@ export class Transport {
       this.queue.splice(0, this.queue.length - this.timing.maxQueue);
       this.opts.onError('queue_overflow');
     }
-    if (this.queue.length >= this.timing.batchSize) void this.sendWithRetry();
-    else this.schedule();
+    // write-through: a fast reload can skip pagehide, so the queue is always on disk
+    this.persist();
+    if (this.queue.length >= this.timing.batchSize) void this.kick();
+    else this.schedule(this.timing.batchDelayMs);
   }
 
-  /** Send everything queued, bounded by timeoutMs (C3). */
+  /** Send everything queued, bounded by timeoutMs (C3). Joins the running drain loop. */
   async flush(timeoutMs: number): Promise<FlushResult> {
     this.clearTimer();
-    let timedOut = false;
-    const drain = (async () => {
-      while (!this.stopped && this.queue.length > 0) {
-        const ok = await this.sendWithRetry();
-        if (!ok) break;
-      }
-    })();
-    await Promise.race([
-      drain,
-      sleep(timeoutMs).then(() => {
-        timedOut = this.queue.length > 0;
-      }),
-    ]);
-    if (this.queue.length > 0) timedOut = true;
-    return { ackedThrough: this.lastAcked, timedOut };
+    await Promise.race([this.kick(), sleep(timeoutMs)]);
+    return { ackedThrough: this.lastAcked, timedOut: this.queue.length > 0 };
   }
 
   stop(): void {
@@ -111,12 +100,12 @@ export class Transport {
     remove(keys.queue(this.opts.scope));
   }
 
-  private schedule(): void {
+  private schedule(ms: number): void {
     if (this.timer || this.stopped) return;
     this.timer = setTimeout(() => {
       this.timer = null;
-      void this.sendWithRetry();
-    }, this.timing.batchDelayMs);
+      void this.kick();
+    }, ms);
   }
 
   private clearTimer(): void {
@@ -124,88 +113,108 @@ export class Transport {
     this.timer = null;
   }
 
-  private async sendWithRetry(): Promise<boolean> {
-    const delays = this.timing.retryDelaysMs;
-    for (let attempt = 0; attempt <= delays.length; attempt++) {
-      const result = await this.sendOnce();
-      if (result !== 'retry') return result === 'ok';
-      if (attempt < delays.length) await sleep(delays[attempt]);
+  /**
+   * The single sender: every trigger (batch size, timer, flush, restore) joins this one loop,
+   * so there is exactly one request in flight and one shared retry backoff.
+   */
+  private kick(): Promise<void> {
+    if (!this.draining) {
+      this.draining = this.drainLoop().finally(() => {
+        this.draining = null;
+      });
     }
-    return false;
+    return this.draining;
   }
 
-  /** One request at a time: a caller arriving mid-flight waits for it, then sends what is left. */
+  private async drainLoop(): Promise<void> {
+    const delays = this.timing.retryDelaysMs;
+    let attempt = 0;
+    while (!this.stopped && this.queue.length > 0) {
+      const result = await this.sendOnce();
+      if (result === 'ok') {
+        attempt = 0;
+        continue;
+      }
+      if (result === 'fatal') return;
+      if (attempt >= delays.length) {
+        // give up for now; try again later with a fresh backoff
+        this.schedule(delays[delays.length - 1] ?? this.timing.batchDelayMs);
+        return;
+      }
+      await sleep(delays[attempt++]);
+    }
+  }
+
   private async sendOnce(): Promise<'ok' | 'retry' | 'fatal'> {
-    while (this.inFlight) await this.inFlight;
     if (this.stopped) return 'fatal';
     if (this.queue.length === 0) return 'ok';
     const batch = this.queue.slice(0, Math.max(1, this.opts.maxBatchEvents));
-    let outcome: 'ok' | 'retry' | 'fatal' = 'retry';
-    this.inFlight = (async () => {
-      try {
-        const body: EventsRequest = { batch_id: uuid(), events: batch };
-        const res = await request<EventsResponse>(this.opts.eventsUrl, {
-          method: 'POST',
-          body,
-          credential: this.opts.credential,
-        });
-        if (res.status === 200 && res.body) {
-          this.applyAck(batch, res.body);
-          outcome = 'ok';
-        } else if (res.status === 401 || res.status === 410) {
-          outcome = 'fatal';
-          this.discard();
-          this.opts.onAuthFailure(res.status);
-        } else if (isRetryable(res.status)) {
-          outcome = 'retry';
-          this.opts.onError(`events_http_${res.status}`);
-        } else {
-          // 4xx other than auth: drop the batch so it cannot wedge the queue
-          this.removeIds(new Set(batch.map((e) => e.event_id)));
-          outcome = 'ok';
-          this.opts.onError(`events_http_${res.status}`);
-        }
-      } catch {
-        outcome = 'retry';
-        this.opts.onError('network');
-      }
-      return outcome === 'ok';
-    })();
     try {
-      await this.inFlight;
-    } finally {
-      this.inFlight = null;
+      const body: EventsRequest = { schema_version: 1, sdk_version: SDK_VERSION, events: batch };
+      const res = await request<EventsResponse>(this.opts.eventsUrl, {
+        method: 'POST',
+        body,
+        credential: this.opts.credential,
+      });
+      if (
+        (res.status === 200 || res.status === 422) &&
+        res.body &&
+        Array.isArray(res.body.accepted)
+      ) {
+        // 422 = every event in the batch was permanently rejected: still an ACK, never retried
+        this.applyAck(batch, res.body);
+        return 'ok';
+      }
+      if (res.status === 401 || res.status === 410) {
+        this.discard();
+        this.opts.onAuthFailure(res.status);
+        return 'fatal';
+      }
+      this.opts.onError(`events_http_${res.status}`);
+      if (isRetryable(res.status)) return 'retry';
+      // other 4xx: drop the batch so it cannot wedge the queue
+      this.removeIds(new Set(batch.map((e) => e.event_id)));
+      return 'ok';
+    } catch {
+      this.opts.onError('network');
+      return 'retry';
     }
-    return outcome;
   }
 
   private applyAck(batch: CanonicalEvent[], ack: EventsResponse): void {
-    const done = new Set<string>(ack.accepted ?? []);
-    for (const r of ack.rejected ?? []) done.add(r.event_id);
-    for (const e of batch) if (done.has(e.event_id)) this.acked.add(e.event_id);
-    this.removeIds(done);
-    if (typeof ack.last_acked_sequence === 'number') {
-      this.lastAcked = Math.max(this.lastAcked, ack.last_acked_sequence);
+    const done = new Set<string>([...(ack.accepted ?? []), ...(ack.duplicates ?? [])]);
+    for (const r of ack.rejected ?? []) if (r.event_id) done.add(r.event_id);
+    if ((ack.rejected ?? []).some((r) => !r.event_id)) {
+      // a rejection the server could not attribute to an event id: drop the whole batch
+      for (const e of batch) done.add(e.event_id);
     }
+    for (const e of batch) {
+      if (!done.has(e.event_id)) continue;
+      this.acked.add(e.event_id);
+      this.lastAcked = Math.max(this.lastAcked, e.client_sequence);
+    }
+    if (ack.rejected?.length) this.opts.onError(`events_rejected_${ack.rejected[0].code}`);
+    this.removeIds(done);
     this.opts.onAck(ack);
   }
 
   private removeIds(ids: Set<string>): void {
     this.queue = this.queue.filter((e) => !ids.has(e.event_id));
+    this.persist();
   }
 
-  /** pagehide: keep unsent events for the next page on this origin (replaces sendBeacon). */
+  /** Keep unsent events for the next page on this origin (replaces sendBeacon). */
   persist(): void {
+    if (this.stopped && this.queue.length === 0) return;
     if (this.queue.length > 0) writeJson(keys.queue(this.opts.scope), this.queue);
     else remove(keys.queue(this.opts.scope));
   }
 
   private restorePersisted(): void {
     const saved = readJson<CanonicalEvent[]>(keys.queue(this.opts.scope));
-    remove(keys.queue(this.opts.scope));
     if (!saved || saved.length === 0) return;
     const seen = new Set(this.queue.map((e) => e.event_id));
     this.queue = [...saved.filter((e) => !seen.has(e.event_id)), ...this.queue];
-    this.schedule();
+    this.schedule(this.timing.batchDelayMs);
   }
 }

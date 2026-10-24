@@ -1,9 +1,10 @@
+import type { ElementType } from './contracts';
 import { ELIGIBLE_SELECTOR, elementKey, elementType, isExcluded, safeLabel } from './sanitize';
 
 export interface DiscoveredElement {
   route: string;
   element_key: string;
-  element_type: string;
+  element_type: ElementType;
   element_label: string;
 }
 

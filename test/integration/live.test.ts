@@ -6,6 +6,9 @@ import {
   FAST,
   FF,
   FakeApi,
+  PID,
+  SID,
+  STID,
   clickWidget,
   resetDom,
   setPath,
@@ -24,7 +27,7 @@ describe('live mode', () => {
   const boot = async (path: string) => {
     setPath(path);
     sdk = createFirstFive({ ...FAST, navigate });
-    await sdk.init({ projectId: 'ffp_1', endpoint: API });
+    await sdk.init({ projectId: PID, endpoint: API });
     return sdk;
   };
 
@@ -75,7 +78,7 @@ describe('live mode', () => {
     expect(s.diagnose().state).toBe('LIVE_ACTIVE');
     (document.getElementById('pricing') as HTMLElement).click();
     await waitFor(() => api.eventNames().includes('ff_element_clicked'));
-    expect(api.events.every((e) => e.session_id === 'ffx_1' && e.study_id === 'ffs_1')).toBe(true);
+    expect(api.events.every((e) => e.session_id === SID && e.study_id === STID)).toBe(true);
     const click = api.events.find((e) => e.event_name === 'ff_element_clicked');
     expect(click?.page_path).toBe('/start');
     expect(widgetText()).toContain('Create an account');
@@ -84,21 +87,21 @@ describe('live mode', () => {
   it('restores the attempt on reload and continues the sequence (A08)', async () => {
     setPath('/start#ff_launch=T1');
     const first = new FirstFiveCore({ ...FAST, navigate });
-    await first.init({ projectId: 'ffp_1', endpoint: API });
+    await first.init({ projectId: PID, endpoint: API });
     await waitFor(() => api.events.length >= 1);
     const maxBefore = Math.max(...api.events.map((e) => e.client_sequence));
     first.detach(); // simulate unload: listeners gone, session state kept
     const countBefore = api.events.length;
     setPath('/start');
     const second = new FirstFiveCore({ ...FAST, navigate });
-    await second.init({ projectId: 'ffp_1', endpoint: API });
+    await second.init({ projectId: PID, endpoint: API });
     expect(second.sm.state).toBe('LIVE_ACTIVE');
     expect(api.callsTo('/api/sdk/exchange')).toHaveLength(1);
     (document.getElementById('pricing') as HTMLElement).click();
     await waitFor(() => api.events.length > countBefore + 1);
     const fromSecond = api.events.slice(countBefore);
     expect(fromSecond.map((e) => e.event_name)).toEqual(['ff_page_viewed', 'ff_element_clicked']);
-    expect(fromSecond.every((e) => e.session_id === 'ffx_1')).toBe(true);
+    expect(fromSecond.every((e) => e.session_id === SID)).toBe(true);
     expect(Math.min(...fromSecond.map((e) => e.client_sequence))).toBe(maxBefore + 1);
     second.stop();
   });
@@ -122,12 +125,12 @@ describe('live mode', () => {
   it('restores GOAL_CONFIRMED after a reload from the first ACK (A26 + A08)', async () => {
     setPath('/start#ff_launch=T1');
     const first = new FirstFiveCore({ ...FAST, navigate });
-    await first.init({ projectId: 'ffp_1', endpoint: API });
+    await first.init({ projectId: PID, endpoint: API });
     window.history.pushState(null, '', '/dashboard');
     await waitFor(() => first.sm.state === 'GOAL_CONFIRMED');
     first.detach();
     const again = new FirstFiveCore({ ...FAST, navigate });
-    await again.init({ projectId: 'ffp_1', endpoint: API });
+    await again.init({ projectId: PID, endpoint: API });
     expect(again.sm.state).toBe('LIVE_ACTIVE');
     await waitFor(() => again.sm.state === 'GOAL_CONFIRMED');
     expect(widgetActions()).toEqual(['continue']);
@@ -148,7 +151,7 @@ describe('live mode', () => {
     const sent = Math.max(...api.events.map((e) => e.client_sequence));
     expect((end.body as { last_client_sequence: number }).last_client_sequence).toBe(sent);
     expect(api.eventNames()).toContain('ff_element_clicked');
-    expect(navigate).toHaveBeenCalledWith(`${FF}/study/ffs_1/feedback?handoff=h1`);
+    expect(navigate).toHaveBeenCalledWith(`${FF}/t/${STID}/feedback#h=h1`);
   });
 
   it("sends reason 'stuck' and redirects to feedback (A10)", async () => {
@@ -156,14 +159,14 @@ describe('live mode', () => {
     clickWidget('stuck');
     clickWidget('confirm-yes');
     await waitFor(() => navigate.mock.calls.length === 1);
-    expect((api.callsTo('/end')[0].body as { reason: string }).reason).toBe('stuck');
+    expect((api.callsTo('/end')[0].body as { reason: string }).reason).toBe('gave_up');
     expect(s.diagnose().state).toBe('STOPPED');
   });
 
   it('sends exactly one /end when ending is requested twice (idempotent)', async () => {
     setPath('/start#ff_launch=T1');
     const core = new FirstFiveCore({ ...FAST, navigate });
-    await core.init({ projectId: 'ffp_1', endpoint: API });
+    await core.init({ projectId: PID, endpoint: API });
     const a = requestEnd(core, 'finish');
     const b = requestEnd(core, 'stuck');
     expect(a).toBe(b);
@@ -198,7 +201,7 @@ describe('live mode', () => {
     (document.getElementById('pricing') as HTMLElement).click();
     await waitFor(() => s.diagnose().state === 'STOPPED');
     expect(widgetText()).toContain('This test has ended');
-    expect(window.sessionStorage.getItem('ff:cred:ffp_1')).toBeNull();
+    expect(window.sessionStorage.getItem('ff:cred:ffp_demo0001')).toBeNull();
   });
 
   it('records a form submission without reading values, and allowlisted custom events', async () => {
@@ -213,11 +216,54 @@ describe('live mode', () => {
     s.track('not_allowed');
     await waitFor(() => api.eventNames().includes('ff_custom_event'));
     const form = api.events.find((e) => e.event_name === 'ff_form_submitted');
-    expect(form?.form_key).toBe('signup_form');
+    expect(form?.element_id).toBe('signup_form');
     const custom = api.events.filter((e) => e.event_name === 'ff_custom_event');
     expect(custom).toHaveLength(1);
-    expect(custom[0].custom_props).toEqual({ plan: 'free' });
+    expect(custom[0].properties).toEqual({ plan: 'free' });
     expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('sends the exchange body the server accepts (no `kind`) and events with no unknown keys', async () => {
+    await boot('/start#ff_launch=T1');
+    expect(Object.keys(api.callsTo('/api/sdk/exchange')[0].body as object).sort()).toEqual([
+      'project_id',
+      'sdk_version',
+      'ticket',
+    ]);
+    (document.getElementById('pricing') as HTMLElement).click();
+    await waitFor(() => api.eventNames().includes('ff_element_clicked'));
+    const click = api.events.find((e) => e.event_name === 'ff_element_clicked');
+    expect(click?.element_type).toBe('link');
+    expect(click?.timestamp).toMatch(/Z$/);
+  });
+
+  it('hands off to feedback when the server reports the attempt already dropped', async () => {
+    api.opts.sessionStatusOverride = 'dropped';
+    await boot('/start#ff_launch=T1');
+    await waitFor(() => navigate.mock.calls.length === 1);
+    expect((api.callsTo('/end')[0].body as { reason: string }).reason).toBe('gave_up');
+  });
+
+  it('shows a thank-you state when the server offers no feedback', async () => {
+    api.opts.endUrl = null;
+    const s = await boot('/start#ff_launch=T1');
+    clickWidget('finish');
+    clickWidget('confirm-yes');
+    await waitFor(() => widgetText().includes('Thanks, the test has ended'));
+    expect(navigate).not.toHaveBeenCalled();
+    expect(s.diagnose().state).toBe('STOPPED');
+  });
+
+  it('allows any valid custom event when the allowlist is empty, and drops sensitive props', async () => {
+    api.opts.allowedCustomEvents = [];
+    const s = await boot('/start#ff_launch=T1');
+    s.track('order_completed', { plan: 'pro', email: 'a@b.c', 'Bad-Key': 1 });
+    s.track('Not Valid');
+    await waitFor(() => api.eventNames().includes('ff_custom_event'));
+    const custom = api.events.filter((e) => e.event_name === 'ff_custom_event');
+    expect(custom).toHaveLength(1);
+    expect(custom[0].custom_event_name).toBe('order_completed');
+    expect(custom[0].properties).toEqual({ plan: 'pro' });
   });
 
   it('records one page view per SPA route change without duplicates (A05)', async () => {
