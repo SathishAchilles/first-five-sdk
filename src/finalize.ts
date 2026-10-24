@@ -18,7 +18,7 @@ export function requestEnd(core: FirstFiveCore, reason: 'finish' | 'stuck'): Pro
 async function run(core: FirstFiveCore, reason: 'finish' | 'stuck'): Promise<void> {
   const cred = core.credential;
   const transport = core.transport;
-  if (!cred || !transport || !core.sequence || !cred.session_id) return;
+  if (!cred || !transport || !core.sequence) return;
   core.sm.to('FLUSHING');
   core.widget.render({ kind: 'saving' });
   await transport.flush(core.flushTimeoutMs);
@@ -27,14 +27,36 @@ async function run(core: FirstFiveCore, reason: 'finish' | 'stuck'): Promise<voi
   core.sm.to('TASK_FINALIZING');
 
   const res = await postWithRetry<EndResponse>(
-    `${core.endpoint}/api/sessions/${encodeURIComponent(cred.session_id)}/end`,
-    { reason, last_client_sequence: core.sequence.current() },
+    `${core.apiBaseUrl}/api/sdk/session/end`,
+    {
+      reason: reason === 'stuck' ? 'gave_up' : 'finished',
+      last_client_sequence: core.sequence.current(),
+    },
     cred.credential,
     core.retryDelaysMs,
   );
-  const url = res?.status === 200 ? res.body?.feedback_handoff?.url : undefined;
-  if (!url || !core.isFirstFiveUrl(url)) {
+  if (res?.status === 401 || res?.status === 410) {
+    // the session is already over on the server: same terminal path as events
+    core.lastErrorCode = `end_http_${res.status}`;
+    core.showEnded();
+    core.terminate();
+    return;
+  }
+  if (res?.status !== 200 || !res.body) {
     core.fail(res ? `end_http_${res.status}` : 'end_network');
+    core.widget.render({ kind: 'error', returnUrl: core.returnUrl() });
+    return;
+  }
+  const url = res.body.feedback_url;
+  if (url === null) {
+    // the server offers no feedback for this attempt (e.g. invalid): finish politely
+    if (core.projectId) clearCredential(core.projectId);
+    core.widget.render({ kind: 'done', returnUrl: core.returnUrl() });
+    core.sm.to('STOPPED');
+    return;
+  }
+  if (!url || !core.isFirstFiveUrl(url)) {
+    core.fail('end_bad_feedback_url');
     core.widget.render({ kind: 'error', returnUrl: core.returnUrl() });
     return;
   }

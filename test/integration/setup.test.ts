@@ -5,6 +5,7 @@ import {
   FAST,
   FF,
   FakeApi,
+  PID,
   clickWidget,
   resetDom,
   setPath,
@@ -20,9 +21,9 @@ describe('setup mode (C4, C5)', () => {
   let sdk: Sdk | null;
 
   const boot = async () => {
-    setPath('/#ff_setup=S1');
+    setPath('/#ff_setup=setup-S1');
     sdk = createFirstFive({ ...FAST, navigate });
-    await sdk.init({ projectId: 'ffp_1', endpoint: API });
+    await sdk.init({ projectId: PID, endpoint: API });
     return sdk;
   };
 
@@ -49,8 +50,8 @@ describe('setup mode (C4, C5)', () => {
     expect(s.diagnose().mode).toBe('setup');
     await waitFor(() => api.eventNames().filter((n) => n === 'ff_element_discovered').length === 2);
     const discovered = api.events.filter((e) => e.event_name === 'ff_element_discovered');
-    expect(discovered.map((e) => e.element_key)).toContain('get_started');
-    expect(discovered.every((e) => e.session_id === null && e.mode === 'setup')).toBe(true);
+    expect(discovered.map((e) => e.element_id)).toContain('get_started');
+    expect(discovered.every((e) => e.session_id === undefined && e.mode === 'setup')).toBe(true);
     expect(api.eventNames()).not.toContain('ff_element_clicked');
     expect(widgetText()).toContain('elements found');
   });
@@ -76,7 +77,7 @@ describe('setup mode (C4, C5)', () => {
         api.events.some(
           (e) =>
             e.event_name === 'ff_element_discovered' &&
-            e.element_key === 'late_button' &&
+            e.element_id === 'late_button' &&
             e.page_path === '/features',
         ),
       3000,
@@ -92,21 +93,21 @@ describe('setup mode (C4, C5)', () => {
     await waitFor(
       () =>
         api.events.some(
-          (e) => e.element_key === 'signup_from_features' && e.page_path === '/features',
+          (e) => e.element_id === 'signup_from_features' && e.page_path === '/features',
         ),
       3000,
     );
   });
 
   it('keeps walk counts across a page load and does not re-report elements', async () => {
-    setPath('/#ff_setup=S1');
+    setPath('/#ff_setup=setup-S1');
     const first = new FirstFiveCore({ ...FAST, navigate });
-    await first.init({ projectId: 'ffp_1', endpoint: API });
+    await first.init({ projectId: PID, endpoint: API });
     await waitFor(() => api.eventNames().filter((n) => n === 'ff_element_discovered').length === 2);
     first.detach();
     setPath('/');
     const second = new FirstFiveCore({ ...FAST, navigate });
-    await second.init({ projectId: 'ffp_1', endpoint: API });
+    await second.init({ projectId: PID, endpoint: API });
     expect(second.sm.state).toBe('SETUP_ACTIVE');
     await new Promise((r) => setTimeout(r, 700));
     expect(api.eventNames().filter((n) => n === 'ff_element_discovered')).toHaveLength(2);
@@ -120,9 +121,9 @@ describe('setup mode (C4, C5)', () => {
     first.stop();
     api.events = [];
     document.querySelectorAll('first-five-widget').forEach((n) => n.remove());
-    setPath('/#ff_setup=S2');
+    setPath('/#ff_setup=setup-S2');
     const second = createFirstFive({ ...FAST, navigate });
-    await second.init({ projectId: 'ffp_1', endpoint: API });
+    await second.init({ projectId: PID, endpoint: API });
     await waitFor(() => api.events.length >= 1);
     expect(Math.min(...api.events.map((e) => e.client_sequence))).toBe(1);
     second.stop();
@@ -135,9 +136,17 @@ describe('setup mode (C4, C5)', () => {
     const finish = api.callsTo('/api/sdk/setup/finish')[0];
     const sent = Math.max(...api.events.map((e) => e.client_sequence));
     expect((finish.body as { last_client_sequence: number }).last_client_sequence).toBe(sent);
-    expect(navigate).toHaveBeenCalledWith(`${FF}/projects/ffp_1/discovery?setup=done`);
+    expect(navigate).toHaveBeenCalledWith(`${FF}/app/websites/p1`);
     expect(s.diagnose().state).toBe('READY');
-    expect(window.sessionStorage.getItem('ff:cred:ffp_1')).toBeNull();
+    expect(window.sessionStorage.getItem('ff:cred:ffp_demo0001')).toBeNull();
+  });
+
+  it('falls back to the websites page when the server returns no return_url', async () => {
+    api.opts.setupReturnUrl = null;
+    await boot();
+    clickWidget('finish-setup');
+    await waitFor(() => navigate.mock.calls.length === 1);
+    expect(navigate).toHaveBeenCalledWith(`${FF}/app/websites`);
   });
 
   it('rejects a foreign return_url', async () => {

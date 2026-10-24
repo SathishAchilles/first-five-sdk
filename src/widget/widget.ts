@@ -7,6 +7,7 @@ export type WidgetView =
   | { kind: 'complete' }
   | { kind: 'ended'; returnUrl: string }
   | { kind: 'error'; returnUrl: string }
+  | { kind: 'done'; returnUrl: string }
   | { kind: 'setup'; pages: number; elements: number }
   | { kind: 'setup_expired'; returnUrl: string };
 
@@ -43,8 +44,17 @@ export class Widget {
     this.host = document.createElement(WIDGET_TAG);
     this.host.setAttribute('data-firstfive-ignore', '');
     this.root = this.host.attachShadow({ mode: 'open' });
-    const style = document.createElement('style');
-    style.textContent = WIDGET_CSS;
+    // Constructable stylesheets are CSSOM, so a strict style-src CSP does not block them;
+    // fall back to an inline <style> where they are unsupported.
+    let style: HTMLStyleElement | null = null;
+    try {
+      const sheet = new CSSStyleSheet();
+      sheet.replaceSync(WIDGET_CSS);
+      this.root.adoptedStyleSheets = [sheet];
+    } catch {
+      style = document.createElement('style');
+      style.textContent = WIDGET_CSS;
+    }
     this.panel = document.createElement('div');
     this.panel.className = 'ff';
     this.panel.setAttribute('role', 'region');
@@ -52,7 +62,8 @@ export class Widget {
     this.status = document.createElement('div');
     this.status.className = 'status';
     this.status.setAttribute('aria-live', 'polite');
-    this.root.append(style, this.panel, this.status);
+    if (style) this.root.append(style);
+    this.root.append(this.panel, this.status);
     document.documentElement.appendChild(this.host);
   }
 
@@ -125,6 +136,14 @@ export class Widget {
           row(this.link('Return to First Five', view.returnUrl)),
         );
         announce = "Couldn't save";
+        break;
+      case 'done':
+        panel.append(
+          title('First Five test'),
+          text('Thanks, the test has ended.'),
+          row(this.link('Return to First Five', view.returnUrl)),
+        );
+        announce = 'The test has ended';
         break;
       case 'setup':
         panel.append(

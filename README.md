@@ -7,7 +7,7 @@ Browser SDK for [First Five](https://github.com/SathishAchilles/first-five-sdk),
 
 The SDK talks only to the First Five API. It does nothing for ordinary visitors.
 
-> Status: `0.1.0` on the `next` dist-tag. The First Five API that implements the contract below is being built; the repo includes a mock server for local development.
+> Status: `0.2.0` speaks the First Five Render API contract v1 (`packages/sdk-contract` in the First Five app). The repo includes a mock server for local development.
 
 ## Install
 
@@ -17,14 +17,15 @@ Paste the project snippet from First Five into your shared layout, so it loads o
 <script
   async
   src="https://YOUR_FIRST_FIVE_HOST/sdk/v1/firstfive.js"
-  data-project-id="ffp_123"
+  data-firstfive-project="ffp_xxxxxxxx"
+  data-firstfive-api="https://YOUR_FIRST_FIVE_HOST"
 ></script>
 ```
 
-| Attribute         | Required | Meaning                                                                                                                      |
-| ----------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `data-project-id` | yes      | Your public project ID (not a secret)                                                                                        |
-| `data-endpoint`   | no       | First Five API origin. Defaults to the script's own origin. **Required** if you load the script from a CDN (unpkg, jsDelivr) |
+| Attribute                | Required | Meaning                                                                                                                                                  |
+| ------------------------ | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `data-firstfive-project` | yes      | Your public project ID (not a secret). `data-project-id` also works                                                                                      |
+| `data-firstfive-api`     | no       | First Five API origin. Defaults to the script's own origin. **Required** if you load the script from a CDN (unpkg, jsDelivr). `data-endpoint` also works |
 
 Or install from npm and start it yourself:
 
@@ -35,7 +36,7 @@ npm install @firstfive/sdk@next
 ```ts
 import { FirstFive } from '@firstfive/sdk';
 
-FirstFive.init({ projectId: 'ffp_123', endpoint: 'https://YOUR_FIRST_FIVE_HOST' });
+FirstFive.init({ projectId: 'ffp_xxxxxxxx', endpoint: 'https://YOUR_FIRST_FIVE_HOST' });
 ```
 
 ### Mark your important controls
@@ -86,23 +87,24 @@ FirstFive.version: string
 
 ## Wire contract
 
-`src/contracts.ts` holds the exact types; `dev/mock-server.mjs` is an executable reference.
+`src/contracts.ts` mirrors the First Five API contract v1; `dev/mock-server.mjs` is a local executable copy.
 
-| Call                              | Purpose                                                                                                                                                                   |
-| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /api/sdk/config?project_id=` | Allowed origins, event allowlists, batch limit, First Five origin                                                                                                         |
-| `POST /api/sdk/exchange`          | One-time `#ff_setup=` / `#ff_launch=` ticket (or `?ff_t=&ff_k=`) plus `sdk_version`, exchanged for a short-lived credential                                               |
-| `POST /api/sdk/events`            | Batched events (Bearer credential, `X-FirstFive-SDK` header). The ACK carries a **session-level `goal_status`**, which the server evaluates inside the events transaction |
-| `POST /api/sessions/:id/end`      | `{reason: finish \| stuck, last_client_sequence}`. Always returns a `feedback_handoff`                                                                                    |
-| `POST /api/sdk/setup/finish`      | Ends the setup walk and returns the First Five `return_url`                                                                                                               |
+| Call                                           | Purpose                                                                                                                                                                                                       |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /api/sdk/config?project_id=&sdk_version=` | Allowed origins, event and custom-event allowlists, limits, `api_base_url`                                                                                                                                    |
+| `POST /api/sdk/exchange`                       | `{project_id, ticket, sdk_version}`: the one-time `#ff_setup=` / `#ff_launch=` ticket (or `?ff_t=&ff_k=`) becomes a short-lived credential. Live context comes back under `study`                             |
+| `POST /api/sdk/events`                         | `{schema_version: 1, sdk_version, events}` with a Bearer credential. The ACK lists `accepted`, `duplicates` and `rejected`, plus `goal` and `session_status`, which are evaluated inside the same transaction |
+| `POST /api/sdk/session/end`                    | `{reason: finished \| gave_up, last_client_sequence}` returns `{session_status, final_reason, feedback_url}`                                                                                                  |
+| `POST /api/sdk/setup/finish`                   | Ends the setup walk and returns `{status, return_url?}`                                                                                                                                                       |
 
 Behaviour the server can rely on:
 
-- **Goal confirmation:** when an ACK says `goal_status: "verified"`, the widget shows "Task complete" with **Continue to feedback**. Continue calls `/end` and follows its `feedback_handoff` (the SDK ignores any handoff inside the ACK).
-- **Flush before finish:** finishing waits up to 3 s for queued events to be acknowledged, then sends `/end` with `last_client_sequence`, so the server can tell whether it has every event.
-- **At-least-once delivery:** an event can be sent twice (for example when a page navigates mid-request). The server must deduplicate on `event_id`.
+- **Headers:** requests send only `Content-Type` and `Authorization` (no custom headers), so the API's CORS preflight only needs those two. The SDK version travels in the body, or as a query param on config.
+- **Goal confirmation (C2):** when an ACK says `goal.verified: true`, the widget shows "Task complete" with **Continue to feedback**. Continue calls `/session/end` and follows `feedback_url`. If an ACK reports `session_status` `dropped` or `invalid`, the SDK ends the attempt the same way.
+- **Flush before finish (C3):** finishing waits up to 3 s for queued events to be acknowledged, then sends `last_client_sequence`, so the server can tell whether it has every event.
+- **At-least-once delivery:** an event can be sent twice (for example when a page navigates mid-request). Events the server lists as `duplicates` count as acknowledged. A 422 (every event in the batch rejected) is final and never retried.
 - **Errors:** 401 or 410 stop the SDK and show "This test has ended". 429, 5xx and network errors are retried after 1, 2 and 4 s.
-- **Redirects:** feedback and return URLs must be on the configured First Five origin.
+- **Redirects:** `feedback_url` and `return_url` must be on the First Five origin (`first_five_origin`, otherwise the origin of `api_base_url`). If `feedback_url` is `null`, the widget shows a thank-you state.
 
 ### Serving the script from First Five
 

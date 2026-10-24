@@ -19,7 +19,7 @@ import {
 import { Sequence, uuid } from './ids';
 import { keys, readJson, remove, writeJson } from './storage';
 import { StateMachine, TRACKING_STATES } from './state';
-import { cleanCustomProps } from './track/custom';
+import { CUSTOM_EVENT_NAME, cleanCustomProps } from './track/custom';
 import { installClicks } from './track/click';
 import { installForms } from './track/form';
 import { installPageviews } from './track/pageview';
@@ -84,6 +84,11 @@ export class FirstFiveCore {
     });
   }
 
+  /** API base for SDK calls: the config's api_base_url, else the script endpoint. */
+  get apiBaseUrl(): string {
+    return this.config?.apiBaseUrl || this.endpoint || '';
+  }
+
   get flushTimeoutMs(): number {
     return this.options.flushTimeoutMs ?? 3000;
   }
@@ -134,7 +139,8 @@ export class FirstFiveCore {
       if (result.kind === 'ok') {
         saveCredential(result.credential);
         if (result.credential.mode === 'setup') {
-          // a fresh ticket starts a new walk: reset its sequence, counts and dedup
+          // a fresh ticket starts a new walk: reset its queue, sequence, counts and dedup
+          remove(keys.queue(`setup:${this.projectId}`));
           remove(keys.sequence(`setup:${this.projectId}`));
           this.clearWalk();
         }
@@ -143,7 +149,7 @@ export class FirstFiveCore {
         this.mode = ticket.kind;
         this.lastErrorCode = `exchange_${result.status}`;
         this.showEnded();
-        this.sm.to('STOPPED');
+        this.terminate();
       } else {
         this.fail('exchange_failed');
       }
@@ -162,10 +168,10 @@ export class FirstFiveCore {
       cred.mode === 'live' && cred.session_id ? cred.session_id : `setup:${cred.project_id}`;
     this.sequence = new Sequence(scope);
     this.transport = new Transport({
-      eventsUrl: config.events_url || `${this.endpoint}/api/sdk/events`,
+      eventsUrl: `${config.apiBaseUrl || this.endpoint}/api/sdk/events`,
       credential: cred.credential,
       scope,
-      maxBatchEvents: config.max_batch_events || 20,
+      maxBatchEvents: config.max_batch_events,
       onAck: (ack) => this.onAck(ack),
       onAuthFailure: (status) => this.onAuthFailure(status),
       onError: (code) => this.fail(code),
@@ -182,9 +188,9 @@ export class FirstFiveCore {
         (el) =>
           this.emit('ff_element_discovered', {
             page_path: el.route,
-            element_key: el.element_key,
+            element_id: el.element_key,
             element_type: el.element_type,
-            element_label: el.element_label,
+            ...(el.element_label ? { element_label: el.element_label } : {}),
           }),
         () => this.widget.element,
         this.discoveredSeen,
@@ -211,10 +217,17 @@ export class FirstFiveCore {
         }
       }),
       installClicks(
-        (info) => this.emit('ff_element_clicked', { ...info }),
+        (info) =>
+          this.emit('ff_element_clicked', {
+            element_id: info.element_key,
+            element_type: info.element_type,
+            ...(info.element_label ? { element_label: info.element_label } : {}),
+          }),
         () => this.widget.element,
       ),
-      installForms((key) => this.emit('ff_form_submitted', { form_key: key })),
+      installForms((key) =>
+        this.emit('ff_form_submitted', { element_id: key, element_type: 'form' }),
+      ),
     );
     if (this.discovery) {
       this.discovery.start();
@@ -246,16 +259,18 @@ export class FirstFiveCore {
     }
     const allow = this.config?.event_allowlist;
     if (allow && allow.length > 0 && !allow.includes(name)) return;
+    const cred = this.credential;
     const event: CanonicalEvent = {
       schema_version: 1,
       event_id: uuid(),
       event_name: name,
-      project_id: this.credential.project_id,
-      study_id: this.credential.study_id,
-      session_id: this.credential.session_id,
-      mode: this.credential.mode,
+      project_id: cred.project_id,
+      // the server schema is strict: live ids only in live mode, never null
+      ...(cred.mode === 'live' && cred.study_id ? { study_id: cred.study_id } : {}),
+      ...(cred.mode === 'live' && cred.session_id ? { session_id: cred.session_id } : {}),
+      mode: cred.mode,
       client_sequence: this.sequence.next(),
-      client_timestamp: new Date().toISOString(),
+      timestamp: new Date().toISOString(),
       page_path: this.currentRoute,
       ...fields,
     };
@@ -263,12 +278,32 @@ export class FirstFiveCore {
   }
 
   track(name: string, props?: Record<string, string | number | boolean>): void {
-    if (!this.config?.custom_event_allowlist.includes(name)) return;
-    this.emit('ff_custom_event', { custom_name: name, custom_props: cleanCustomProps(props) });
+    try {
+      if (!this.config || typeof name !== 'string' || !CUSTOM_EVENT_NAME.test(name)) return;
+      // same rule as the server: an empty allowlist allows any valid name
+      const allow = this.config.custom_event_allowlist;
+      if (allow.length > 0 && !allow.includes(name)) return;
+      const properties = cleanCustomProps(props);
+      this.emit('ff_custom_event', {
+        custom_event_name: name,
+        ...(Object.keys(properties).length ? { properties } : {}),
+      });
+    } catch {
+      // never break the host page
+    }
   }
 
   private onAck(ack: EventsResponse): void {
     goalOnAck(this, ack);
+    if (
+      this.mode === 'live' &&
+      (ack.session_status === 'dropped' || ack.session_status === 'invalid') &&
+      (this.sm.state === 'LIVE_ACTIVE' || this.sm.state === 'GOAL_CONFIRMED')
+    ) {
+      // the server already finalised this attempt (deadline / invalid): offer the feedback hand-off
+      void requestEnd(this, 'stuck');
+      return;
+    }
     if (this.mode === 'setup') {
       this.saveWalk();
       this.renderSetup();
@@ -282,11 +317,32 @@ export class FirstFiveCore {
   }
 
   private endSession(): void {
+    this.terminate();
+  }
+
+  /**
+   * The credential is dead (rejected ticket, 401/410 on any call): stop tracking and remove the
+   * credential, its persisted queue and sequence, and any setup-walk state.
+   */
+  terminate(): void {
     this.uninstallTrackers();
-    this.clearWalk();
-    if (this.projectId) clearCredential(this.projectId);
     this.transport?.discard();
-    this.sm.to('STOPPED');
+    this.clearSessionStorage();
+    if (this.sm.state !== 'STOPPED') this.sm.to('STOPPED');
+  }
+
+  /** Remove everything this project keeps in sessionStorage. */
+  clearSessionStorage(): void {
+    if (!this.projectId) return;
+    const stored = readJson<StoredCredential>(keys.credential(this.projectId));
+    const scopes = [`setup:${this.projectId}`];
+    for (const c of [stored, this.credential]) if (c?.session_id) scopes.push(c.session_id);
+    for (const scope of scopes) {
+      remove(keys.queue(scope));
+      remove(keys.sequence(scope));
+    }
+    clearCredential(this.projectId);
+    this.clearWalk();
   }
 
   showEnded(): void {
