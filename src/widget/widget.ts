@@ -29,7 +29,7 @@ export class Widget {
   private root: ShadowRoot | null = null;
   private panel: HTMLDivElement | null = null;
   private status: HTMLDivElement | null = null;
-  private corner: Corner = 'br';
+  private corner: Corner = 'bl';
   /** Corner chosen by the participant with the move control; wins over auto placement. */
   private pinned = false;
   private minimised = false;

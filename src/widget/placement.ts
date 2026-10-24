@@ -1,10 +1,11 @@
 /**
  * Keep the widget clear of the host page's own floating UI (hosting badges, chat bubbles,
  * floating action buttons): probe each viewport corner for fixed/sticky host elements and
- * use the first free one.
+ * use the first free one, starting bottom-left (bottom-right is where hosting badges such as
+ * Netlify's and chat bubbles usually sit).
  */
 export type Corner = 'br' | 'bl' | 'tr' | 'tl';
-export const CORNERS: Corner[] = ['br', 'bl', 'tr', 'tl'];
+export const CORNERS: Corner[] = ['bl', 'br', 'tl', 'tr'];
 export const GAP = 12;
 
 function isFloating(el: Element | null): boolean {
@@ -53,7 +54,7 @@ export function occupancy(corner: Corner, width: number, height: number, self: E
 
 /** First corner with no host floating UI, else the least covered one. */
 export function pickCorner(width: number, height: number, self: Element): Corner {
-  let best: Corner = 'br';
+  let best: Corner = 'bl';
   let bestHits = Number.POSITIVE_INFINITY;
   for (const c of CORNERS) {
     const hits = occupancy(c, width, height, self);
