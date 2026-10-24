@@ -1,3 +1,5 @@
+import { keys, readJson, writeJson } from '../storage';
+import { CORNERS, applyCorner, pickCorner, type Corner } from './placement';
 import { WIDGET_CSS } from './styles';
 
 export type WidgetView =
@@ -27,6 +29,12 @@ export class Widget {
   private root: ShadowRoot | null = null;
   private panel: HTMLDivElement | null = null;
   private status: HTMLDivElement | null = null;
+  private corner: Corner = 'br';
+  /** Corner chosen by the participant with the move control; wins over auto placement. */
+  private pinned = false;
+  private minimised = false;
+  private timers: ReturnType<typeof setTimeout>[] = [];
+  private readonly onResize = () => this.place();
   view: WidgetView | null = null;
 
   constructor(private readonly actions: WidgetActions) {}
@@ -64,7 +72,64 @@ export class Widget {
     this.status.setAttribute('aria-live', 'polite');
     if (style) this.root.append(style);
     this.root.append(this.panel, this.status);
+    this.styleHost(this.host);
     document.documentElement.appendChild(this.host);
+    // Top layer: nothing on the host page can paint over the widget, whatever its z-index.
+    try {
+      this.host.setAttribute('popover', 'manual');
+      (this.host as HTMLElement & { showPopover?: () => void }).showPopover?.();
+    } catch {
+      this.host.removeAttribute('popover');
+    }
+    const saved = readJson<Corner>(keys.widgetCorner());
+    if (saved && CORNERS.includes(saved)) {
+      this.corner = saved;
+      this.pinned = true;
+    }
+    this.place();
+    // Host badges and chat widgets often load late: re-check the corner a few times.
+    for (const ms of [800, 2500, 6000]) this.timers.push(setTimeout(() => this.place(), ms));
+    window.addEventListener('resize', this.onResize);
+  }
+
+  /** Fixed, transparent, maximum z-index host; set via CSSOM so strict CSPs allow it. */
+  private styleHost(host: HTMLElement): void {
+    const s = host.style;
+    s.setProperty('position', 'fixed', 'important');
+    s.setProperty('z-index', '2147483647', 'important');
+    s.setProperty('margin', '0', 'important');
+    s.setProperty('padding', '0', 'important');
+    s.setProperty('border', '0', 'important');
+    s.setProperty('background', 'transparent', 'important');
+    s.setProperty('width', 'auto', 'important');
+    s.setProperty('height', 'auto', 'important');
+    s.setProperty('overflow', 'visible', 'important');
+    s.setProperty('inset', 'auto');
+  }
+
+  /** Pick the free corner (unless the participant moved it) and apply it. */
+  place(): void {
+    if (!this.host) return;
+    if (!this.pinned) {
+      const box = this.panel?.getBoundingClientRect();
+      const w = box && box.width > 0 ? box.width : Math.min(320, window.innerWidth - 24);
+      const h = box && box.height > 0 ? box.height : 140;
+      this.corner = pickCorner(w, h, this.host);
+    }
+    applyCorner(this.host, this.corner);
+  }
+
+  /** Move control: cycle corners and remember the choice for this tab. */
+  private move(): void {
+    this.corner = CORNERS[(CORNERS.indexOf(this.corner) + 1) % CORNERS.length];
+    this.pinned = true;
+    writeJson(keys.widgetCorner(), this.corner);
+    this.place();
+  }
+
+  private setMinimised(value: boolean): void {
+    this.minimised = value;
+    if (this.view) this.render(this.view);
   }
 
   render(view: WidgetView): void {
@@ -72,7 +137,41 @@ export class Widget {
     this.view = view;
     const panel = this.panel as HTMLDivElement;
     panel.replaceChildren();
-    const title = (t: string) => this.el('p', 'title', t);
+    // States that need the participant's attention always open the panel.
+    if (['complete', 'ended', 'error', 'done', 'setup_expired', 'confirm'].includes(view.kind)) {
+      this.minimised = false;
+    }
+    if (this.minimised) {
+      panel.style.setProperty('padding', '0');
+      panel.style.setProperty('border', '0');
+      panel.style.setProperty('background', 'transparent');
+      panel.style.setProperty('box-shadow', 'none');
+      panel.style.setProperty('width', 'auto');
+      const label =
+        view.kind === 'setup' || view.kind === 'setup_expired'
+          ? 'First Five setup ▴'
+          : 'First Five test ▴';
+      const pill = this.button(label, () => this.setMinimised(false), 'expand');
+      pill.className = 'pill';
+      pill.setAttribute('aria-label', 'Show First Five controls');
+      panel.append(pill);
+      this.place();
+      return;
+    }
+    panel.removeAttribute('style');
+    const title = (t: string) => {
+      const head = this.el('div', 'head');
+      const move = this.button('⇆', () => this.move(), 'move', true);
+      move.className = 'icon';
+      move.setAttribute('aria-label', 'Move this panel to another corner');
+      move.title = 'Move';
+      const min = this.button('–', () => this.setMinimised(true), 'minimise', true);
+      min.className = 'icon';
+      min.setAttribute('aria-label', 'Minimise this panel');
+      min.title = 'Minimise';
+      head.append(this.el('p', 'title', t), move, min);
+      return head;
+    };
     const text = (t: string) => this.el('p', 'text', t);
     const row = (...children: HTMLElement[]) => {
       const r = this.el('div', 'row');
@@ -165,9 +264,13 @@ export class Widget {
         break;
     }
     if (announce && this.status) this.status.textContent = announce;
+    this.place();
   }
 
   destroy(): void {
+    for (const t of this.timers) clearTimeout(t);
+    this.timers = [];
+    window.removeEventListener('resize', this.onResize);
     this.host?.remove();
     this.host = null;
     this.root = null;

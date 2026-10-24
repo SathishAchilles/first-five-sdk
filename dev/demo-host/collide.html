@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Collision check · Acme Notes</title>
+    <script
+      async
+      src="http://localhost:5173/sdk/v1/firstfive.js"
+      data-firstfive-project="ffp_demo0001"
+    ></script>
+    <style>
+      body {
+        font: 16px system-ui;
+        max-width: 640px;
+        margin: 40px auto;
+      }
+      .badge {
+        position: fixed;
+        right: 16px;
+        bottom: 16px;
+        z-index: 2147483647;
+        background: #0e2a33;
+        color: #fff;
+        padding: 12px 18px;
+        border-radius: 999px;
+      }
+      .fab {
+        position: fixed;
+        right: 24px;
+        bottom: 90px;
+        width: 56px;
+        height: 56px;
+        border-radius: 50%;
+        background: #999;
+        z-index: 99999;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Collision check</h1>
+    <p>A hosting badge and a floating button sit bottom-right, like Netlify's badge.</p>
+    <a href="/dashboard">Dashboard</a>
+    <div class="badge">Powered by Netlify</div>
+    <div class="fab" aria-label="Edit"></div>
+  </body>
+</html>
