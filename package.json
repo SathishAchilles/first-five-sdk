@@ -1,6 +1,6 @@
 {
   "name": "@firstfive/sdk",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "First Five browser SDK: setup discovery, consented task tracking and the task-control widget for First Five usability studies.",
   "license": "MIT",
   "author": "Sathish",
